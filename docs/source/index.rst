@@ -28,7 +28,8 @@ OneFlow API Reference
     experimental 
     scope 
     sysconfig 
-    onnx   
+    onnx  
+    quantization 
     random 
     system 
     regularizers  

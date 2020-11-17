@@ -30,14 +30,46 @@ def min_max_observer(
     per_layer_quantize: bool = True,
     name: Optional[str] = None,
 ) -> Tuple[remote_blob_util.BlobDef, remote_blob_util.BlobDef]:
-    r"""Calculate the quantization scale and zero_point of the input `Blob`.
+    r"""Compute the quantization parameters of the input `Blob`.
+
+    First compute the max and min values of input `Blob`:
+
+    .. math::
+
+        & max\_value = max(input)
+
+        & min\_value = min(input)
+
+    Then compute the scale and zero_point with the following equations:
+
+        if quantize_scheme == "symmetric": 
+
+        .. math::
+
+            & denom = 2^{quantize\_to\_bit - 1} - 1
+            
+            & scale = max(|max\_value|,|min\_value|) / denom
+
+            & zero\_point = 0
+
+        elif quantize_scheme == "affine":
+
+        .. math::
+
+            & denom = 2^{quantize\_to\_bit} - 1
+            
+            & scale = (max\_value - min\_value) / denom
+
+            & zero\_point = -min\_value / scale
+    
+    If per_layer_quantize is False, then the shape of scale and zero_point will be (input.shape[0],).
 
     Args:
         input (remote_blob_util.BlobDef): A `Blob`.
-        quantize_to_bit (Optional[int], optional): Optional, int value. Quantize input to uintX / intX, X can be in range [2, 8]. Defaults to 8. 
-        quantize_scheme (Optional[str], optional): Optional, str value. "symmetric" or "affine", quantize to signed / unsigned integer. Defaults to "symmetric". 
-        per_layer_quantize (Optional[bool], optional): Optional, bool value. True or False, means per-layer / per-channel quantize. Defaults to True.
-        name (Optional[str], optional):  This operator's name(optional). Defaults to None.
+        quantize_to_bit (Optional[int], optional): Quantize input to uintX / intX, X can be in range [2, 8]. Defaults to 8. 
+        quantize_scheme (Optional[str], optional): "symmetric" or "affine", quantize to signed / unsigned integer. Defaults to "symmetric". 
+        per_layer_quantize (Optional[bool], optional): True or False, means per-layer / per-channel quantize. Defaults to True.
+        name (Optional[str], optional): This operator's name(optional). Defaults to None.
 
     Returns:
         Tuple[remote_blob_util.BlobDef, remote_blob_util.BlobDef]: The scale and zero_point of input `Blob`.
@@ -56,7 +88,7 @@ def min_max_observer(
         ): tp.Numpy
             with flow.scope.placement(device_type, "0:0"):
                 scale, zero_point = flow.quantization.MinMaxObserver(
-                    input, quantize_to_bit, quantize_scheme, per_layer_quantize
+                    input, quantize_to_bit=8, quantize_scheme="symmetric", per_layer_quantize=True
                 )
             return scale, zero_point
 
@@ -93,7 +125,84 @@ def moving_average_min_max_observer(
     momentum: float = 0.95,
     name: Optional[str] = None,
 ) -> Tuple[remote_blob_util.BlobDef, remote_blob_util.BlobDef]:
+    r"""Compute the quantization parameters based on the moving average of the input `Blob`'s min and max values.
 
+    First compute the moving\_max and moving\_min value of input `Blob`:
+
+        if quantize_scheme == "symmetric": 
+
+        .. math::
+
+            & moving\_max = moving\_max * momentum + |max(input)| * (1 - momentum)
+
+            & moving\_min = moving\_max
+
+        elif quantize_scheme == "affine":
+
+        .. math::
+
+            & moving\_max = moving\_max * momentum + max(input) * (1 - momentum)
+
+            & moving\_min = moving\_min * momentum + min(input) * (1 - momentum)
+
+    The moving average of min and max values are initialized as the first batch of input `Blob`'s min and max.
+
+    Then compute the scale and zero_point with the following equations:
+
+        if quantize_scheme == "symmetric": 
+
+        .. math::
+
+            & denom = 2^{quantize\_to\_bit - 1} - 1
+            
+            & scale = moving\_max / denom
+
+            & zero\_point = 0
+
+        elif quantize_scheme == "affine":
+
+        .. math::
+
+            & denom = 2^{quantize\_to\_bit} - 1
+            
+            & scale = (moving\_max - moving\_min) / denom
+
+            & zero\_point = -moving\_min / scale
+    
+    Args:
+        input (remote_blob_util.BlobDef): A `Blob`.
+        quantize_to_bit (Optional[int], optional): Quantize input to uintX / intX, X can be in range [2, 8]. Defaults to 8. 
+        quantize_scheme (Optional[str], optional): "symmetric" or "affine", quantize to signed / unsigned integer. Defaults to "symmetric". 
+        momentum (Optional[float], optional): Smoothing parameter for exponential moving average operation. Defaults to 0.95.
+        name (Optional[str], optional): This operator's name(optional). Defaults to None.
+
+    Returns:
+        Tuple[remote_blob_util.BlobDef, remote_blob_util.BlobDef]: The scale and zero_point of input `Blob`.
+    
+    For example: 
+
+    .. code-block:: python 
+
+        import oneflow as flow
+        import numpy as np
+        import oneflow.typing as tp
+
+        @flow.global_function(type="predict", function_config=flow.FunctionConfig())
+        def QuantizeJob(
+            input: tp.Numpy.Placeholder(input_shape, dtype=type_name_to_flow_type[dtype])
+        ): tp.Numpy
+            with flow.scope.placement(device_type, "0:0"):
+                scale, zero_point = flow.quantization.MovingAverageMinMaxObserver(
+                    input, quantize_to_bit=8, quantize_scheme="symmetric", momentum=0.95
+                )
+            return scale, zero_point
+
+        check_point = flow.train.CheckPoint()
+        check_point.init()
+        input = (np.random.random(input_shape) - 0.5).astype(type_name_to_np_type[dtype])
+        scale, zero_point = QuantizeJob(input)
+
+    """
     op_name = (
         name if name is not None else id_util.UniqueStr("MovingAverageMinMaxObserver_")
     )
@@ -151,7 +260,68 @@ def fake_quantization(
     quantize_scheme: str = "symmetric",
     name: Optional[str] = None,
 ) -> remote_blob_util.BlobDef:
+    r"""Simulate the quantize and dequantize operations in training time.
 
+    The output will be computed as:
+
+        if quantize_scheme == "symmetric": 
+
+        .. math::
+
+            & quant\_max = 2^{quantize\_to\_bit - 1} - 1
+            
+            & quant\_min = -quant\_max
+
+            & clamp(round(x / scale), quant\_min, quant\_max) * scale
+
+        elif quantize_scheme == "affine":
+
+        .. math::
+
+            & quant\_max = 2^{quantize\_to\_bit} - 1
+            
+            & quant\_min = 0
+
+            & (clamp(round(x / scale + zero\_point), quant\_min, quant\_max) - zero\_point) * scale
+
+    Args:
+        input (remote_blob_util.BlobDef): A `Blob`.
+        scale (remote_blob_util.BlobDef): Computed by MinMaxObserver or MovingAverageMinMaxObserver op.
+        zero_point (remote_blob_util.BlobDef): Computed by MinMaxObserver or MovingAverageMinMaxObserver op.
+        quantize_to_bit (Optional[int], optional): Quantize input to uintX / intX, X can be in range [2, 8]. Defaults to 8. 
+        quantize_scheme (Optional[str], optional): "symmetric" or "affine", quantize to signed / unsigned integer. Defaults to "symmetric". 
+        name (Optional[str], optional): This operator's name(optional). Defaults to None.
+
+    Returns:
+        remote_blob_util.BlobDef: Input `Blob` after quantize and dequantize operations.
+
+    For example: 
+
+    .. code-block:: python 
+
+        import oneflow as flow
+        import numpy as np
+        import oneflow.typing as tp
+
+        @flow.global_function(type="predict", function_config=flow.FunctionConfig())
+        def QuantizeJob(
+            input: tp.Numpy.Placeholder(input_shape, dtype=type_name_to_flow_type[dtype])
+        ): tp.Numpy
+            with flow.scope.placement(device_type, "0:0"):
+                scale, zero_point = flow.quantization.MinMaxObserver(
+                    input, quantize_to_bit=8, quantize_scheme="symmetric", per_layer_quantize=True
+                )
+                fake_quantize_out = flow.quantization.FakeQuantize(
+                    input, scale, zero_point, quantize_to_bit=8, quantize_scheme="symmetric"
+                )
+            return fake_quantize_out
+
+        check_point = flow.train.CheckPoint()
+        check_point.init()
+        input = (np.random.random(input_shape) - 0.5).astype(type_name_to_np_type[dtype])
+        fake_quantize_out = QuantizeJob(input)
+
+    """
     builder = (
         flow.user_op_builder(
             name if name is not None else id_util.UniqueStr("Fake_Quantization_")
